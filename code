@@ -1,0 +1,294 @@
+#include <Wire.h>
+#include <LiquidCrystal_I2C.h>
+#include <DHT.h>
+
+// ---------------- PINS ----------------
+#define DHTPIN 2
+#define DHTTYPE DHT22
+
+#define FLOW_PIN 3
+#define BUZZER 4
+#define RED_LED 5
+#define WHITE_LED 6
+
+#define LDR_PIN A0
+#define FSR_PIN A1
+
+// ---------------- LCD ----------------
+// If LCD does not show text, try changing 0x27 to 0x3F
+LiquidCrystal_I2C lcd(0x27, 16, 2);
+
+// ---------------- DHT SENSOR ----------------
+DHT dht(DHTPIN, DHTTYPE);
+
+// ---------------- FLOW SENSOR ----------------
+volatile int flowPulses = 0;
+int flowValue = 0;
+
+// ---------------- THRESHOLDS ----------------
+
+// Artifact pressure sensor
+int FSR_THRESHOLD = 600;
+// If FSR value drops below 600, artifact is removed
+
+// Light sensor
+int LDR_THRESHOLD = 350;
+// If LDR value goes above 350, case is opened
+
+// Flow sensor
+int FLOW_THRESHOLD = 1;
+// If flow pulses are 1 or more, wind/airflow is detected
+
+// Temperature should stay close to 27 C
+float TEMP_LOW = 25.0;
+float TEMP_HIGH = 30.0;
+
+// Humidity should stay close to 80%
+float HUM_LOW = 50.0;
+float HUM_HIGH = 90.0;
+
+// ---------------- TIMING VARIABLES ----------------
+unsigned long lastFlowTime = 0;
+unsigned long lastLCDTime = 0;
+int normalScreen = 0;
+
+// ---------------- FLOW INTERRUPT FUNCTION ----------------
+void countFlowPulse() {
+  flowPulses++;
+}
+
+void setup() {
+  Serial.begin(9600);
+
+  lcd.init();
+  lcd.backlight();
+
+  dht.begin();
+
+  pinMode(FLOW_PIN, INPUT_PULLUP);
+  pinMode(BUZZER, OUTPUT);
+  pinMode(RED_LED, OUTPUT);
+  pinMode(WHITE_LED, OUTPUT);
+
+  attachInterrupt(digitalPinToInterrupt(FLOW_PIN), countFlowPulse, RISING);
+
+  digitalWrite(WHITE_LED, LOW);
+  digitalWrite(RED_LED, LOW);
+  noTone(BUZZER);
+
+  lcd.setCursor(0, 0);
+  lcd.print("MAPSS SYSTEM");
+  lcd.setCursor(0, 1);
+  lcd.print("Starting...");
+  delay(2000);
+}
+
+void loop() {
+
+  // -------- READ FLOW SENSOR EVERY 1 SECOND --------
+  if (millis() - lastFlowTime >= 1000) {
+    noInterrupts();
+    flowValue = flowPulses;
+    flowPulses = 0;
+    interrupts();
+
+    lastFlowTime = millis();
+  }
+
+  // -------- READ SENSORS --------
+  float temp = dht.readTemperature();
+  float hum = dht.readHumidity();
+
+  int ldrValue = analogRead(LDR_PIN);
+  int fsrValue = analogRead(FSR_PIN);
+
+  // -------- CHECK CONDITIONS --------
+  bool artifactRemoved = fsrValue < FSR_THRESHOLD;
+
+  bool caseOpenedByLight = ldrValue > LDR_THRESHOLD;
+
+  bool windDetected = flowValue >= FLOW_THRESHOLD;
+
+  bool tempProblem = false;
+  bool humProblem = false;
+
+  if (!isnan(temp)) {
+    tempProblem = (temp < TEMP_LOW || temp > TEMP_HIGH);
+  }
+
+  if (!isnan(hum)) {
+    humProblem = (hum < HUM_LOW || hum > HUM_HIGH);
+  }
+
+  bool environmentProblem = tempProblem || humProblem;
+
+  bool alarm = artifactRemoved || caseOpenedByLight || windDetected || environmentProblem;
+
+  // -------- LED CONTROL --------
+  if (alarm) {
+    digitalWrite(WHITE_LED, LOW);
+    digitalWrite(RED_LED, HIGH);
+  } 
+  else {
+    digitalWrite(WHITE_LED, HIGH);
+    digitalWrite(RED_LED, LOW);
+  }
+
+  // -------- BUZZER CONTROL --------
+  unsigned long currentTime = millis();
+
+  // Priority 1: artifact removed = continuous buzzer
+  if (artifactRemoved) {
+    tone(BUZZER, 1000);
+  }
+
+  // Priority 2: temp OR humidity unsafe = 3 beeps every 1 second
+  else if (environmentProblem) {
+    unsigned long phase = currentTime % 1000;
+
+    if (phase < 100 ||
+        (phase >= 200 && phase < 300) ||
+        (phase >= 400 && phase < 500)) {
+      tone(BUZZER, 1000);
+    } 
+    else {
+      noTone(BUZZER);
+    }
+  }
+
+  // Priority 3: wind detected = 2 beeps every 1 second
+  else if (windDetected) {
+    unsigned long phase = currentTime % 1000;
+
+    if (phase < 150 ||
+        (phase >= 300 && phase < 450)) {
+      tone(BUZZER, 1000);
+    } 
+    else {
+      noTone(BUZZER);
+    }
+  }
+
+  // Priority 4: case opened = 1 beep every 1 second
+  else if (caseOpenedByLight) {
+    unsigned long phase = currentTime % 1000;
+
+    if (phase < 200) {
+      tone(BUZZER, 1000);
+    } 
+    else {
+      noTone(BUZZER);
+    }
+  }
+
+  // Normal = buzzer off
+  else {
+    noTone(BUZZER);
+  }
+
+  // -------- LCD DISPLAY --------
+  if (millis() - lastLCDTime >= 1000) {
+    lcd.clear();
+
+    if (artifactRemoved) {
+      lcd.setCursor(0, 0);
+      lcd.print("ALERT!");
+      lcd.setCursor(0, 1);
+      lcd.print("Artifact Gone");
+    }
+
+else if (windDetected) {
+      lcd.setCursor(0, 0);
+      lcd.print("ALERT!");
+      lcd.setCursor(0, 1);
+      lcd.print("Wind Detected");
+    }
+
+else if (tempProblem) {
+      lcd.setCursor(0, 0);
+      lcd.print("WARNING!");
+      lcd.setCursor(0, 1);
+      lcd.print("Temp Unsafe");
+    }
+
+else if (humProblem) {
+      lcd.setCursor(0, 0);
+      lcd.print("WARNING!");
+      lcd.setCursor(0, 1);
+      lcd.print("Humidity Unsafe");
+    }
+
+else if (caseOpenedByLight) {
+      lcd.setCursor(0, 0);
+      lcd.print("ALERT!");
+      lcd.setCursor(0, 1);
+      lcd.print("Case Opened");
+    }
+
+    else {
+      // Normal rotating screens
+      if (normalScreen == 0) {
+        lcd.setCursor(0, 0);
+        lcd.print("MAPSS ACTIVE");
+        lcd.setCursor(0, 1);
+        lcd.print("Artifact Safe");
+
+        normalScreen = 1;
+      }
+
+      else if (normalScreen == 1) {
+        lcd.setCursor(0, 0);
+        lcd.print("T:");
+        lcd.print(temp, 1);
+        lcd.print("C H:");
+        lcd.print(hum, 0);
+        lcd.print("%");
+
+        lcd.setCursor(0, 1);
+        lcd.print("Env Stable");
+
+        normalScreen = 2;
+      }
+
+      else if (normalScreen == 2) {
+        lcd.setCursor(0, 0);
+        lcd.print("L:");
+        lcd.print(ldrValue);
+        lcd.print(" F:");
+        lcd.print(fsrValue);
+
+        lcd.setCursor(0, 1);
+        lcd.print("Flow:");
+        lcd.print(flowValue);
+
+        normalScreen = 0;
+      }
+    }
+
+    lastLCDTime = millis();
+  }
+
+  // -------- SERIAL MONITOR DEBUG --------
+  Serial.print("Temp: ");
+  Serial.print(temp);
+  Serial.print(" C | Hum: ");
+  Serial.print(hum);
+  Serial.print(" % | LDR: ");
+  Serial.print(ldrValue);
+  Serial.print(" | FSR: ");
+  Serial.print(fsrValue);
+  Serial.print(" | Flow: ");
+  Serial.print(flowValue);
+
+  Serial.print(" | Artifact: ");
+  Serial.print(artifactRemoved);
+
+  Serial.print(" | Case: ");
+  Serial.print(caseOpenedByLight);
+
+  Serial.print(" | Wind: ");
+  Serial.print(windDetected);
+
+  Serial.print(" | Env: ");
+  Serial.println(environmentProblem);
+}
